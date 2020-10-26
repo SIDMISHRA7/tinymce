@@ -1,17 +1,31 @@
 import { Assertions, Chain, Guard, Log, Pipeline, UiFinder } from '@ephox/agar';
 import { UnitTest } from '@ephox/bedrock-client';
 import { Cell } from '@ephox/katamari';
-import { Editor as McEditor } from '@ephox/mcagar';
-import { Attribute, Html, SelectorFind, SugarBody, SugarElement } from '@ephox/sugar';
+import { Editor as McEditor, TinyLoader } from '@ephox/mcagar';
+import { Attribute, Css, Html, SelectorFind, SugarBody, SugarElement, SugarShadowDom } from '@ephox/sugar';
 import Editor from 'tinymce/core/api/Editor';
 
 import FullscreenPlugin from 'tinymce/plugins/fullscreen/Plugin';
 import LinkPlugin from 'tinymce/plugins/link/Plugin';
 import SilverTheme from 'tinymce/themes/silver/Theme';
 
-export const cWaitForDialog = (ariaLabel) =>
+const getContentContainer = (editor: Editor) =>
+  SugarShadowDom.getContentContainer(SugarShadowDom.getRootNode(SugarElement.fromDom(editor.getElement())));
+
+const cCloseOnlyWindow = Chain.control(
+  Chain.op((editor: Editor) => {
+    const dialogs = () => UiFinder.findAllIn(getContentContainer(editor), '[role="dialog"]');
+    Assertions.assertEq('One window exists', 1, dialogs().length);
+    editor.windowManager.close();
+    Assertions.assertEq('No windows exist', 0, dialogs().length);
+  }),
+  Guard.addLogging('Close window')
+);
+
+const cWaitForDialog = (ariaLabel: string) =>
   Chain.control(
-    Chain.fromChainsWith(SugarBody.body(), [
+    Chain.fromChains([
+      Chain.mapper(getContentContainer),
       UiFinder.cWaitFor('Waiting for dialog', '[role="dialog"]'),
       Chain.op((dialog) => {
         if (Attribute.has(dialog, 'aria-labelledby')) {
@@ -56,55 +70,71 @@ UnitTest.asynctest('browser.tinymce.plugins.fullscreen.FullScreenPluginTest', (s
     );
   };
 
-  const cCloseOnlyWindow = Chain.control(
-    Chain.op((editor: Editor) => {
-      const dialogs = () => UiFinder.findAllIn(SugarBody.body(), '[role="dialog"]');
-      Assertions.assertEq('One window exists', 1, dialogs().length);
-      editor.windowManager.close();
-      Assertions.assertEq('No windows exist', 0, dialogs().length);
-    }),
-    Guard.addLogging('Close window')
-  );
+  const cAsssertEditorContainerStates = (label: string, shouldExist: boolean) =>
+    Chain.control(
+      Chain.fromChains([
+        Chain.fromIsolatedChains([
+          Chain.mapper((editor: Editor) => SugarElement.fromDom(editor.getContainer())),
+          UiFinder.cFindIn(shouldExist ? 'root:.tox-fullscreen' : 'root::not(.tox-fullscreen)'),
+          Chain.op((container) => {
+            const containerZIndex = Css.get(container, 'z-index');
+            Assertions.assertEq('Editor container z-index', shouldExist ? '1200' : 'auto', containerZIndex);
+          })
+        ]),
+        Chain.fromIsolatedChains([
+          Chain.mapper(getContentContainer),
+          UiFinder.cFindIn('.tox-silver-sink.tox-tinymce-aux'),
+          Chain.op((sink) => {
+            const sinkZIndex = Css.get(sink, 'z-index');
+            Assertions.assertEq('Editor sink z-index', shouldExist ? '1201' : '1300', sinkZIndex);
+          })
+        ])
+      ]),
+      Guard.addLogging(label)
+    );
 
-  const cSetupEditor = McEditor.cFromSettings({
+  TinyLoader.setupInBodyAndShadowRoot((editor: Editor, onSuccess, onFailure) => {
+    Pipeline.async({}, [
+      Log.chainsAsStep('TBA', 'FullScreen: Toggle fullscreen on, open link dialog, insert link, close dialog and toggle fullscreen off', [
+        Chain.inject(editor),
+        Chain.fromParent(Chain.identity, [
+          cAssertFullscreenClass('Before fullscreen command', false),
+          Chain.op((editor: Editor) => editor.execCommand('mceFullScreen', true)),
+          cAssertEditorAndLastEvent('After fullscreen command', true),
+          cAssertFullscreenClass('After fullscreen command', true),
+          cAsssertEditorContainerStates('After fullscreen command', true),
+          Chain.op((editor: Editor) => editor.execCommand('mceLink', true)),
+          cWaitForDialog('Insert/Edit Link'),
+          cCloseOnlyWindow,
+          cAssertFullscreenClass('After window is closed', true),
+          cAsssertEditorContainerStates('After window is closed', true),
+          Chain.op((editor: Editor) => editor.execCommand('mceFullScreen')),
+          cAssertEditorAndLastEvent('After fullscreen toggled', false),
+          cAssertFullscreenClass('After fullscreen toggled', false),
+          cAsssertEditorContainerStates('After fullscreen toggled', false)
+        ])
+      ]),
+      Log.chainsAsStep('TBA', 'FullScreen: Toggle fullscreen and remove editor should clean up classes', [
+        Chain.inject(editor),
+        Chain.fromParent(Chain.identity, [
+          Chain.op((editor: Editor) => editor.execCommand('mceFullScreen', true)),
+          cAssertEditorAndLastEvent('After fullscreen command', true),
+          cAssertFullscreenClass('After fullscreen command', true)
+        ]),
+        McEditor.cRemove,
+        cAssertFullscreenClass('After editor is closed', false)
+      ])
+    ], onSuccess, onFailure);
+  }, {
     plugins: 'fullscreen link',
     theme: 'silver',
     base_url: '/project/tinymce/js/tinymce',
     setup: (editor: Editor) => {
       lastEventArgs.set(null);
-      editor.on('FullscreenStateChanged', (e: Editor) => {
+      editor.on('FullscreenStateChanged', (e) => {
+        editor.setContent('abc');
         lastEventArgs.set(e);
       });
     }
-  });
-
-  Pipeline.async({}, [
-    Log.chainsAsStep('TBA', 'FullScreen: Toggle fullscreen on, open link dialog, insert link, close dialog and toggle fullscreen off', [
-      cSetupEditor,
-      Chain.fromParent(Chain.identity, [
-        cAssertFullscreenClass('Before fullscreen command', false),
-        Chain.op((editor: Editor) => editor.execCommand('mceFullScreen', true)),
-        cAssertEditorAndLastEvent('After fullscreen command', true),
-        cAssertFullscreenClass('After fullscreen command', true),
-        Chain.op((editor: Editor) => editor.execCommand('mceLink', true)),
-        cWaitForDialog('Insert/Edit Link'),
-        cCloseOnlyWindow,
-        cAssertFullscreenClass('After window is closed', true),
-        Chain.op((editor: Editor) => editor.execCommand('mceFullScreen')),
-        cAssertEditorAndLastEvent('After fullscreen toggled', false),
-        cAssertFullscreenClass('After fullscreen toggled', false)
-      ]),
-      McEditor.cRemove
-    ]),
-    Log.chainsAsStep('TBA', 'FullScreen: Toggle fullscreen and remove editor should clean up classes', [
-      cSetupEditor,
-      Chain.fromParent(Chain.identity, [
-        Chain.op((editor: Editor) => editor.execCommand('mceFullScreen', true)),
-        cAssertEditorAndLastEvent('After fullscreen command', true),
-        cAssertFullscreenClass('After fullscreen command', true)
-      ]),
-      McEditor.cRemove,
-      cAssertFullscreenClass('After editor is closed', false)
-    ])
-  ], success, failure);
+  }, success, failure);
 });
